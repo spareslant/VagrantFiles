@@ -19,6 +19,12 @@ all_hosts = [
     },
 ]
 
+CRIO_VERSION="1.21"
+OS="CentOS_8"
+K8S_VERSION="1.21.4"
+
+
+
 # individual machine names must be mentioned in below command line in
 # order to bring up machines. (due to autostart: false)
 # vagrant up master worker1
@@ -44,8 +50,8 @@ Vagrant.configure("2") do |config|
       s.args = "'" + JSON.generate(all_hosts) + "'"
     end
     config.vm.provision :shell, privileged: true, name: "allow_bridged_traffic", inline: $allow_bridged_traffic
-    config.vm.provision :shell, privileged: true, name: "install_crio", inline: $install_crio
-    config.vm.provision :shell, privileged: true, name: "install_k8s", inline: $install_k8s
+    config.vm.provision :shell, privileged: true, name: "install_crio", inline: $install_crio, args: [CRIO_VERSION, OS]
+    config.vm.provision :shell, privileged: true, name: "install_k8s", inline: $install_k8s, args: K8S_VERSION
     config.vm.provision :shell, privileged: true, name: "setup_k8s_master", inline: $setup_k8s_master
     config.vm.provision :shell, privileged: true, name: "generate_join_cmd", inline: $generate_join_cmd
     config.vm.provision :shell, privileged: true, name: "setup_k8s_node", inline: $setup_k8s_node
@@ -126,8 +132,8 @@ net.bridge.bridge-nf-call-ip6tables = 1
 EOF
 sysctl --system
 
-VERSION="1.21"
-OS="CentOS_8_Stream"
+VERSION="$1"
+OS="$2"
 
 curl -L -o /etc/yum.repos.d/devel:kubic:libcontainers:stable.repo https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/$OS/devel:kubic:libcontainers:stable.repo
 curl -L -o /etc/yum.repos.d/devel:kubic:libcontainers:stable:cri-o:$VERSION.repo https://download.opensuse.org/repositories/devel:kubic:libcontainers:stable:cri-o:$VERSION/$OS/devel:kubic:libcontainers:stable:cri-o:$VERSION.repo
@@ -144,6 +150,9 @@ CRIO
 ########################################
 $install_k8s = <<-K8S
 set -euo pipefail
+
+k8s_version="$1"
+
 # This script is idempotent
 echo "=====================Installing K8S ========================="
 cat <<-'EOF' > /etc/yum.repos.d/kubernetes.repo
@@ -161,7 +170,7 @@ EOF
 setenforce 0
 sed -i 's/^SELINUX=enforcing$/SELINUX=permissive/' /etc/selinux/config
 
-yum install -y kubelet kubeadm kubectl --disableexcludes=kubernetes
+yum install -y kubelet-${k8s_version} kubeadm-${k8s_version} kubectl-${k8s_version} --disableexcludes=kubernetes
 
 systemctl enable --now kubelet
 K8S
