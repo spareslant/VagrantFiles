@@ -1,0 +1,74 @@
+require 'json'
+
+all_hosts = [
+    {
+        vagrant_hostname: "centos8-guest-additions",
+        full_hostname: "centos8-guest-additions.virtual.machine",
+        vmbox: "centos/8",
+        ip: "10.0.0.10",
+        memory: 2048,
+        cpus: 3
+    },
+]
+
+# individual machine names must be mentioned in below command line in
+# order to bring up machines. (due to autostart: false)
+# vagrant up centos8-guest-additions worker1
+Vagrant.configure("2") do |config|
+
+    all_hosts.each do |host|
+        config.vm.define host[:vagrant_hostname], autostart: false do |this_host|
+            this_host.vm.network :private_network, ip: host[:ip]
+            this_host.vm.hostname = host[:full_hostname]
+            this_host.vm.box = host[:vmbox]
+            this_host.vm.box_version = host[:vmbox_version]
+
+            this_host.vm.provider "virtualbox" do |m|
+                m.memory = host[:memory]
+                m.cpus = host[:cpus]
+            end
+
+        end
+    end
+    config.vm.provision :shell, privileged: true, inline: $install_guess_additions
+end
+
+$install_guess_additions = <<-INSTALL_GUEST_ADDITIONS
+set -euo pipefail
+touch update_done
+if [[ ! -s update_done ]]
+then
+  dnf update -y
+  echo "rebooted_already" > update_done
+  echo "!!!!!!!  Now run following command on your terminal to complete the compilation of guest additions.."
+  cat <<-MESSAGE
+  ==================================================
+  !!!!!!!  Now run following command on your terminal to complete the compilation of guest additions.
+
+  vagrant reload centos8-guest-additions --provision
+  ==================================================
+MESSAGE
+  exit 0
+fi
+
+touch guest_additions_done
+
+dnf install -y gcc kernel kernel-headers kernel-devel make elfutils-libelf-devel
+curl -L -o guest_additions.iso http://download.virtualbox.org/virtualbox/6.1.0_RC1/VBoxGuestAdditions_6.1.0_RC1.iso
+mkdir /mnt/guest_additions
+mount -o loop ./guest_additions.iso /mnt/guest_additions
+/mnt/guest_additions/VBoxLinuxAdditions.run --nox11
+umount /mnt/guest_additions
+rm -f guest_additions.iso
+  cat <<-MESSAGE2
+  ==================================================
+  !!!!! Run following commands
+
+  vagrant reload centos8-guest-additions
+  vagrant package --output centos8-guest-additions.box
+  vagrant box add ./centos8-guest-additions.box --name centos/centos8-guest-additions
+  vagrant box list
+  ==================================================
+MESSAGE2
+
+INSTALL_GUEST_ADDITIONS
