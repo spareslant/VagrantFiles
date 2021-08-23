@@ -4,7 +4,8 @@ all_hosts = [
     {
         vagrant_hostname: "master",
         full_hostname: "master.virtual.machine",
-        vmbox: "centos/8",
+        vmbox: "centos/stream8",
+        vmbox_version: "20210210.0",
         ip: "10.0.0.10",
         memory: 2048,
         cpus: 3
@@ -12,15 +13,25 @@ all_hosts = [
     {
         vagrant_hostname: "worker1",
         full_hostname: "worker1.virtual.machine",
-        vmbox: "centos/8",
+        vmbox: "centos/stream8",
+        vmbox_version: "20210210.0",
         ip: "10.0.0.12",
+        memory: 2048,
+        cpus: 1
+    },
+    {
+        vagrant_hostname: "worker2",
+        full_hostname: "worker2.virtual.machine",
+        vmbox: "centos/stream8",
+        vmbox_version: "20210210.0",
+        ip: "10.0.0.14",
         memory: 2048,
         cpus: 1
     },
 ]
 
 CRIO_VERSION="1.21"
-OS="CentOS_8"
+OS="CentOS_8_Stream"
 K8S_VERSION="1.21.4"
 
 
