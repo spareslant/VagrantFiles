@@ -19,20 +19,32 @@ all_hosts = [
         memory: 2048,
         cpus: 1
     },
+    # {
+    #     vagrant_hostname: "worker2",
+    #     full_hostname: "worker2.virtual.machine",
+    #     vmbox: "centos/stream8",
+    #     vmbox_version: "20210210.0",
+    #     ip: "10.0.0.14",
+    #     memory: 2048,
+    #     cpus: 1
+    # },
     {
-        vagrant_hostname: "worker2",
-        full_hostname: "worker2.virtual.machine",
+        vagrant_hostname: "registry",
+        full_hostname: "registry.virtual.machine",
         vmbox: "centos/stream8",
         vmbox_version: "20210210.0",
-        ip: "10.0.0.14",
+        ip: "10.0.0.16",
         memory: 2048,
         cpus: 1
     },
 ]
 
-CRIO_VERSION="1.21"
-OS="CentOS_8_Stream"
-K8S_VERSION="1.21.4"
+CRIO_VERSION = "1.21"
+OS = "CentOS_8_Stream"
+K8S_VERSION = "1.21.4"
+
+# we need to generate quoted string here
+JSON_ALL_HOSTS = "'" + JSON.generate(all_hosts) + "'"
 
 
 
@@ -53,20 +65,28 @@ Vagrant.configure("2") do |config|
                 m.cpus = host[:cpus]
             end
 
+            this_host.vm.provision :shell, privileged: true, name: "fix_ip_address", inline: $fix_ip_address, args: JSON_ALL_HOSTS
+
+            if host[:full_hostname].match(/^master|^worker/) 
+                this_host.vm.provision :shell, privileged: true, name: "allow_bridged_traffic", inline: $allow_bridged_traffic
+                this_host.vm.provision :shell, privileged: true, name: "install_crio", inline: $install_crio, args: [CRIO_VERSION, OS]
+                this_host.vm.provision :shell, privileged: true, name: "install_k8s", inline: $install_k8s, args: K8S_VERSION
+            end
+
+            if host[:full_hostname].match(/^master/) 
+                this_host.vm.provision :shell, privileged: true, name: "setup_k8s_master", inline: $setup_k8s_master
+                this_host.vm.provision :shell, privileged: true, name: "generate_join_cmd", inline: $generate_join_cmd
+            end
+
+            if host[:full_hostname].match(/^worker/) 
+                this_host.vm.provision :shell, privileged: true, name: "setup_k8s_node", inline: $setup_k8s_node
+            end
+
+            if host[:full_hostname] == "registry.virtual.machine"  
+                this_host.vm.provision :shell, privileged: true, name: "setup_docker_registry", inline: $setup_docker_registry
+            end
         end
     end
-    config.vm.provision :shell, privileged: true do |s|
-      s.inline = $fix_ip_address
-      # we need to pass quoted string here
-      s.args = "'" + JSON.generate(all_hosts) + "'"
-    end
-    config.vm.provision :shell, privileged: true, name: "allow_bridged_traffic", inline: $allow_bridged_traffic
-    config.vm.provision :shell, privileged: true, name: "install_crio", inline: $install_crio, args: [CRIO_VERSION, OS]
-    config.vm.provision :shell, privileged: true, name: "install_k8s", inline: $install_k8s, args: K8S_VERSION
-    config.vm.provision :shell, privileged: true, name: "setup_k8s_master", inline: $setup_k8s_master
-    config.vm.provision :shell, privileged: true, name: "generate_join_cmd", inline: $generate_join_cmd
-    config.vm.provision :shell, privileged: true, name: "setup_k8s_node", inline: $setup_k8s_node
-
 end
 
 ########################################
@@ -90,7 +110,7 @@ non_existence_entries=$(egrep -v -x -f /etc/hosts ip_host_format.txt)
 
 if [[ ! -z "${non_existence_entries}" ]]
 then
-  echo "${non_existence_entries}" >> /etc/hosts
+    echo "${non_existence_entries}" >> /etc/hosts
 fi
 
 cat /etc/hosts
@@ -193,15 +213,14 @@ K8S
 ########################################
 $setup_k8s_master = <<-SETUPMASTER
 set -euo pipefail
-if [[ $HOSTNAME == "master.virtual.machine" ]]
+
+echo "===================== Setup K8S Master ========================="
+kubeadm init --apiserver-advertise-address=10.0.0.10 --control-plane-endpoint=10.0.0.10 --node-name $HOSTNAME --pod-network-cidr="172.20.0.0/16" --upload-certs  2>&1 | tee kubeadm-init.out || :
+messages=$(cat kubeadm-init.out | egrep 'File.+exists|Port.+use' | wc -l || :)
+if [[ "$messages" -eq 10 ]]
 then
-  echo "===================== Setup K8S Master ========================="
-  kubeadm init --apiserver-advertise-address=10.0.0.10 --control-plane-endpoint=10.0.0.10 --node-name $HOSTNAME --pod-network-cidr="172.20.0.0/16" --upload-certs  2>&1 | tee kubeadm-init.out || :
-  messages=$(cat kubeadm-init.out | egrep 'File.+exists|Port.+use' | wc -l || :)
-  if [[ "$messages" -eq 10 ]]
-  then
     echo "$HOSTNAME already configured as K8S control plane.."
-  else
+else
     mkdir -p ~vagrant/.kube
     cp -v -f /etc/kubernetes/admin.conf ~vagrant/.kube/config
     chown -R vagrant:vagrant ~vagrant/.kube
@@ -214,20 +233,19 @@ then
     calico_networking=false
     while [[ $time_now -lt $time_expire ]]
     do
-      echo "=============== Applying Calico Networking =============="
-      kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f https://docs.projectcalico.org/manifests/calico.yaml \
-        && calico_networking=true \
-        && break \
-        || echo "FAILED..will keep on trying for 2 mins.." 1>&2
-      sleep 2
-      time_now=$(date +%s)
+        echo "=============== Applying Calico Networking =============="
+        kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f https://docs.projectcalico.org/manifests/calico.yaml \
+            && calico_networking=true \
+            && break \
+            || echo "FAILED..will keep on trying for 2 mins.." 1>&2
+          sleep 2
+        time_now=$(date +%s)
     done
     if [[ $calico_networking == false ]]
     then
-      echo "ERROR: Failed to apply calico networking" 1>&2
-      exit 1
+        echo "ERROR: Failed to apply calico networking" 1>&2
+        exit 1
     fi
-  fi
 fi
 
 SETUPMASTER
@@ -239,16 +257,15 @@ SETUPMASTER
 ########################################
 $generate_join_cmd = <<-JOINCMD
 set -euo pipefail
-if [[ $HOSTNAME == "master.virtual.machine" ]]
-then
-    mkdir -p /k8s_shared
-    kubeadm token create --print-join-command > /k8s_shared/kube_join_command.sh
-    yum install -y nfs-utils
-    echo "====================== Exporting NFS Share: /k8s_shared ====================="
-    systemctl start nfs-server
-    echo "/k8s_shared *(ro,sync)" > /etc/exports
-    exportfs -av
-fi
+
+mkdir -p /k8s_shared
+kubeadm token create --print-join-command > /k8s_shared/kube_join_command.sh
+yum install -y nfs-utils
+echo "====================== Exporting NFS Share: /k8s_shared ====================="
+systemctl start nfs-server
+echo "/k8s_shared *(ro,sync)" > /etc/exports
+exportfs -av
+
 JOINCMD
 
 
@@ -258,44 +275,51 @@ JOINCMD
 ########################################
 $setup_k8s_node = <<-SETUPNODE
 set -euo pipefail
-if [[ $HOSTNAME != "master.virtual.machine" ]]
-then
-  echo "===================== Setup K8S Node ========================="
-  # k8s control may not be ready by this time. So keep on trying for 2 mins
-  mkdir -p /k8s_shared
+    
+echo "===================== Setup K8S Node ========================="
+# k8s control may not be ready by this time. So keep on trying for 2 mins
+mkdir -p /k8s_shared
 
-  time_now=$(date +%s)
-  # try for 2 mins, 60 seconds
-  time_expire=$((time_now + 60))
-  node_joined=false
-  while [[ $time_now -lt $time_expire ]]
-  do
+time_now=$(date +%s)
+# try for 2 mins, 60 seconds
+time_expire=$((time_now + 60))
+node_joined=false
+while [[ $time_now -lt $time_expire ]]
+do
     echo "=============== mounting master.virtual.machine:/k8s_shared on $HOSTNAME:/k8s_shared ... =============="
     mount -t nfs -o soft,timeo=10,retrans=1,retry=1,fg master.virtual.machine:/k8s_shared /k8s_shared \
-      || { echo "mounting failed..will retry..." 1>&2 ; time_now=$(date +%s);  continue; }
+        || { echo "mounting failed..will retry..." 1>&2 ; time_now=$(date +%s);  continue; }
     echo "=============== $HOSTNAME is trying to join cluster ... =============="
     messages=$(bash /k8s_shared/kube_join_command.sh 2>&1 | egrep 'File.+exists|Port.+use' | wc -l || :)
     if [[ "$messages" -eq 3 ]]
     then
-      echo "$HOSTNAME already configured and joined to cluster"
-      node_joined=true
-      break
+        echo "$HOSTNAME already configured and joined to cluster"
+        node_joined=true
+        break
     fi
 
     bash /k8s_shared/kube_join_command.sh \
-      && node_joined=true \
-      && break \
-      || echo "FAILED..will keep on trying for 1 mins.." 1>&2
-    sleep 2
-    time_now=$(date +%s)
-  done
-  if [[ $node_joined == false ]]
-  then
+        && node_joined=true \
+        && break \
+        || echo "FAILED..will keep on trying for 1 mins.." 1>&2
+        sleep 2
+        time_now=$(date +%s)
+done
+if [[ $node_joined == false ]]
+then
     echo "ERROR: $HOSTNAME failed to join.." 1>&2
     exit 1
-  fi
-else
-  echo "INFO: This is Control Plane. join command will not run here."
 fi
 
 SETUPNODE
+
+
+
+########################################
+# setup docker registry                #
+########################################
+$setup_docker_registry = <<-DOCKER_REGISTRY
+echo "====================== Setup docker registry ====================="
+echo "docker registry" >> DOCKER_REGISTRY_FILE
+
+DOCKER_REGISTRY
