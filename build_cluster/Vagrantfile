@@ -67,22 +67,29 @@ Vagrant.configure("2") do |config|
 
             this_host.vm.provision :shell, privileged: true, name: "fix_ip_address", inline: $fix_ip_address, args: JSON_ALL_HOSTS
 
-            if host[:full_hostname].match(/^master|^worker/) 
+            if host[:full_hostname].match(/^master/) 
+                this_host.vm.provision :shell, privileged: true, name: "gen_registry_certs", inline: $gen_registry_certs
+                this_host.vm.provision :shell, privileged: true, name: "import_registry_certs", inline: $import_registry_certs
                 this_host.vm.provision :shell, privileged: true, name: "allow_bridged_traffic", inline: $allow_bridged_traffic
                 this_host.vm.provision :shell, privileged: true, name: "install_crio", inline: $install_crio, args: [CRIO_VERSION, OS]
                 this_host.vm.provision :shell, privileged: true, name: "install_k8s", inline: $install_k8s, args: K8S_VERSION
-            end
-
-            if host[:full_hostname].match(/^master/) 
                 this_host.vm.provision :shell, privileged: true, name: "setup_k8s_master", inline: $setup_k8s_master
                 this_host.vm.provision :shell, privileged: true, name: "generate_join_cmd", inline: $generate_join_cmd
+                this_host.vm.provision :shell, privileged: true, name: "export_nfs", inline: $export_nfs
             end
 
             if host[:full_hostname].match(/^worker/) 
+                this_host.vm.provision :shell, privileged: true, name: "mount_nfs_share", inline: $mount_nfs_share
+                this_host.vm.provision :shell, privileged: true, name: "import_registry_certs", inline: $import_registry_certs
+                this_host.vm.provision :shell, privileged: true, name: "allow_bridged_traffic", inline: $allow_bridged_traffic
+                this_host.vm.provision :shell, privileged: true, name: "install_crio", inline: $install_crio, args: [CRIO_VERSION, OS]
+                this_host.vm.provision :shell, privileged: true, name: "install_k8s", inline: $install_k8s, args: K8S_VERSION
                 this_host.vm.provision :shell, privileged: true, name: "setup_k8s_node", inline: $setup_k8s_node
             end
 
             if host[:full_hostname] == "registry.virtual.machine"  
+                this_host.vm.provision :shell, privileged: true, name: "mount_nfs_share", inline: $mount_nfs_share
+                this_host.vm.provision :shell, privileged: true, name: "import_registry_certs", inline: $import_registry_certs
                 this_host.vm.provision :shell, privileged: true, name: "setup_docker_registry", inline: $setup_docker_registry
             end
         end
@@ -260,13 +267,59 @@ set -euo pipefail
 
 mkdir -p /k8s_shared
 kubeadm token create --print-join-command > /k8s_shared/kube_join_command.sh
+
+JOINCMD
+
+
+
+########################################
+# Export NFS share                     #
+########################################
+$export_nfs = <<-EXPORTNFS
+set -euo pipefail
+
+mkdir -p /k8s_shared
 yum install -y nfs-utils
 echo "====================== Exporting NFS Share: /k8s_shared ====================="
 systemctl start nfs-server
 echo "/k8s_shared *(ro,sync)" > /etc/exports
 exportfs -av
 
-JOINCMD
+EXPORTNFS
+
+
+
+
+########################################
+# Generate certs for Docker registry   #
+########################################
+$gen_registry_certs = <<-GEN_CERTS
+set -euo pipefail
+
+mkdir -p /k8s_shared/registry_certs
+openssl req \
+    -newkey rsa:4096 -nodes -sha256 -keyout /k8s_shared/registry_certs/registryKey.pem \
+    -addext "subjectAltName = DNS:registry.virtual.machine" \
+    -subj "/C=GB/ST=London/L=London/O=MyCompany/OU=IT/CN=registry.virtual.machine/emailAddress=root@example.com" \
+    -x509 -days 365 -out /k8s_shared/registry_certs/registryCert.pem
+
+chmod 644 /k8s_shared/registry_certs/registryKey.pem
+
+GEN_CERTS
+
+
+
+
+########################################
+# Trust and Import registry certs in OS#
+########################################
+$import_registry_certs = <<-IMPORT_CERTS
+set -euo pipefail
+
+cp -v -f /k8s_shared/registry_certs/registryCert.pem /etc/pki/ca-trust/source/anchors/registry.virtual.machine.crt
+update-ca-trust
+
+IMPORT_CERTS
 
 
 
@@ -286,9 +339,6 @@ time_expire=$((time_now + 60))
 node_joined=false
 while [[ $time_now -lt $time_expire ]]
 do
-    echo "=============== mounting master.virtual.machine:/k8s_shared on $HOSTNAME:/k8s_shared ... =============="
-    mount -t nfs -o soft,timeo=10,retrans=1,retry=1,fg master.virtual.machine:/k8s_shared /k8s_shared \
-        || { echo "mounting failed..will retry..." 1>&2 ; time_now=$(date +%s);  continue; }
     echo "=============== $HOSTNAME is trying to join cluster ... =============="
     messages=$(bash /k8s_shared/kube_join_command.sh 2>&1 | egrep 'File.+exists|Port.+use' | wc -l || :)
     if [[ "$messages" -eq 3 ]]
@@ -315,11 +365,70 @@ SETUPNODE
 
 
 
+
+########################################
+# mount NFS share                      #
+########################################
+$mount_nfs_share = <<-MOUNT_NFS
+set -euo pipefail
+
+mkdir -p /k8s_shared
+
+time_now=$(date +%s)
+# try for 2 mins, 60 seconds
+time_expire=$((time_now + 60))
+share_mounted=false
+while [[ $time_now -lt $time_expire ]]
+do
+    echo "=============== mounting master.virtual.machine:/k8s_shared on $HOSTNAME:/k8s_shared ... =============="
+
+    { mount -t nfs -o soft,timeo=10,retrans=1,retry=1,fg master.virtual.machine:/k8s_shared /k8s_shared \
+        && share_mounted=true \
+        && break
+    } || { echo "mounting failed..will retry..." 1>&2;
+        time_now=$(date +%s);
+        continue;
+    }
+done
+if [[ $share_mounted == false ]]
+then
+    echo "ERROR: $HOSTNAME failed to mount. Is master up and running? " 1>&2
+    exit 1
+fi
+
+MOUNT_NFS
+
+
+
+
 ########################################
 # setup docker registry                #
 ########################################
 $setup_docker_registry = <<-DOCKER_REGISTRY
+set -euo pipefail
+
 echo "====================== Setup docker registry ====================="
-echo "docker registry" >> DOCKER_REGISTRY_FILE
+yum install -y yum-utils
+yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+yum install -y docker-ce docker-ce-cli containerd.io
+systemctl start docker
+
+mkdir -p /private_docker_registry/registry_data
+cp -r -v -f /k8s_shared/registry_certs /private_docker_registry
+chmod 400 /private_docker_registry/registry_certs/registryKey.pem
+
+if docker inspect docker-registry > /dev/null 2>&1 
+then
+    echo "Docker Registry is already running..."
+else
+    docker run -d --name docker-registry --restart=always \
+    -p 5000:5000 \
+    -e REGISTRY_HTTP_ADDR=0.0.0.0:5000 \
+    -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/registryCert.pem \
+    -e REGISTRY_HTTP_TLS_KEY=/certs/registryKey.pem \
+    -v /private_docker_registry/registry_certs:/certs \
+    -v /private_docker_registry/registry_data:/var/lib/registry \
+    registry:2
+fi
 
 DOCKER_REGISTRY
